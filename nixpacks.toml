@@ -5,7 +5,9 @@ aptPkgs = [
   "libsm6",
   "libice6",
   "libxt6",
-  "libglu1-mesa"
+  "libglu1-mesa",
+  "libpq-dev",
+  "libpq5"
 ]
 nixPkgs = [
   "xorg.libXrender",
@@ -17,7 +19,9 @@ nixPkgs = [
 
 [phases.install]
 cmds = [
-  "python -m venv --copies /opt/venv && . /opt/venv/bin/activate && pip install --upgrade pip setuptools wheel && pip install --no-build-isolation -r requirements.txt"
+  "python -m venv --copies /app/.venv",
+  ". /app/.venv/bin/activate && pip install --upgrade pip setuptools wheel",
+  ". /app/.venv/bin/activate && pip install --no-build-isolation -r requirements.txt"
 ]
 
 [start]
