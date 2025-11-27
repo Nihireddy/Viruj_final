@@ -20,7 +20,8 @@ from agno.agent import Agent
 from agno.models.groq import Groq
 from agno.tools.duckduckgo import DuckDuckGoTools
 from dotenv import load_dotenv
-from phi.tools.crawl4ai_tools import Crawl4aiTools
+
+from synthesis_route_finder.synthesis_engine.tools import Crawl4aiTools
 from sqlalchemy import create_engine, text
 
 # Ensure env vars are loaded (works both locally and on Railway)

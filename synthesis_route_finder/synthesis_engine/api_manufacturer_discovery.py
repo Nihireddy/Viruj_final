@@ -9,10 +9,8 @@ from dotenv import load_dotenv
 
 from agno.agent import Agent
 from agno.models.groq import Groq
-try:
-    from phi.tools.crawl4ai_tools import Crawl4aiTools
-except ImportError:  # pragma: no cover - best effort fallback
-    Crawl4aiTools = None
+
+from .tools import Crawl4aiTools
 
 # === Load environment variables ===
 load_dotenv()
@@ -73,10 +71,6 @@ def extract_manufacturers(markdown_output, api_name, country_input, existing_man
 
 
 def create_pharma_agent(api_name, country_input, skip_list):
-    if Crawl4aiTools is None:
-        raise ImportError(
-            "phi.tools.crawl4ai_tools is not installed. Install the 'phi' extras that provide Crawl4aiTools."
-        )
     skip_clause = ", ".join(skip_list) if skip_list else "None"
     return Agent(
         name="Pharma Agent",
