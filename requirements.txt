@@ -17,6 +17,6 @@ xlrd==2.0.1
 sqlalchemy==2.0.23
 psycopg2-binary==2.9.9
 duckduckgo-search==6.1.1
-openai==1.51.0
+openai>=1.54.0
 tenacity==8.4.2
 numpy==1.26.4
