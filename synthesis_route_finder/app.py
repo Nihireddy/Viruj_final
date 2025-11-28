@@ -30,7 +30,7 @@ from synthesis_engine.api_manufacturer_discovery import ApiManufacturerDiscovery
 app = Flask(__name__)
 app.secret_key = 'your-secret-key-here'  # Change this to a secure secret key
 
-# Global analyzer instance
+# Global analyzer instance - lazy loaded to reduce memory usage
 analyzer = None
 api_buyer_finder = None # Global instance for API Buyer Finder
 api_manufacturer_service = None
@@ -43,19 +43,31 @@ stop_events = {}
 # Dictionary to store queues for sending progress updates via SSE
 progress_queues = {}
 
-
-with app.app_context():
-    analyzer = SynthesisAnalyzer()
-    api_buyer_finder = ApiBuyerFinder() # Initialize ApiBuyerFinder
-    api_manufacturer_service = ApiManufacturerService()
-    api_manufacturer_discovery = ApiManufacturerDiscoveryService(api_manufacturer_service)
+# Lazy initialization function to reduce startup memory usage
+def initialize_services():
+    """Lazy initialization of heavy services to reduce memory footprint"""
+    global analyzer, api_buyer_finder, api_manufacturer_service, api_manufacturer_discovery
+    global new_manufacturer_service, new_manufacturer_discovery
     
-    new_db_path = os.environ.get(
-        "NEW_SQLITE_DB_FILENAME",
-        os.path.join(os.path.dirname(__file__), "new_manufacturers.db")
-    )
-    new_manufacturer_service = ApiManufacturerService(db_filename=new_db_path)
-    new_manufacturer_discovery = ApiManufacturerDiscoveryService(new_manufacturer_service)
+    if analyzer is None:
+        with app.app_context():
+            analyzer = SynthesisAnalyzer()
+    
+    if api_buyer_finder is None:
+        with app.app_context():
+            api_buyer_finder = ApiBuyerFinder()
+    
+    if api_manufacturer_service is None:
+        with app.app_context():
+            api_manufacturer_service = ApiManufacturerService()
+            api_manufacturer_discovery = ApiManufacturerDiscoveryService(api_manufacturer_service)
+            
+            new_db_path = os.environ.get(
+                "NEW_SQLITE_DB_FILENAME",
+                os.path.join(os.path.dirname(__file__), "new_manufacturers.db")
+            )
+            new_manufacturer_service = ApiManufacturerService(db_filename=new_db_path)
+            new_manufacturer_discovery = ApiManufacturerDiscoveryService(new_manufacturer_service)
 
 @app.route('/')
 def index():
@@ -66,6 +78,7 @@ def index():
 def analyze_synthesis():
     """Main synthesis analysis endpoint"""
     try:
+        initialize_services()  # Lazy load services when needed
         data = request.get_json()
         
         # Extract parameters
@@ -183,6 +196,7 @@ def stop_analysis_endpoint():
 def chat():
     """Chatbot endpoint for follow-up questions"""
     try:
+        initialize_services()  # Lazy load services when needed
         data = request.get_json()
         
         session_id = data.get('session_id')
@@ -228,6 +242,7 @@ def get_session(session_id):
 
 @app.route('/api/predict_route', methods=['POST'])
 def predict_route():
+    initialize_services()  # Lazy load services when needed
     data = request.json
     api_name = data.get('api_name')
     country_preference = data.get('country_preference', '')
@@ -248,8 +263,6 @@ def predict_route():
         progress_queue = Queue()
         stop_events[session_id] = stop_event
         progress_queues[session_id] = progress_queue
-
-        analyzer = SynthesisAnalyzer()
 
         def prediction_task():
             try:
@@ -327,14 +340,11 @@ def prediction_progress(session_id):
 @app.route('/api/visualize_reaction', methods=['POST'])
 def visualize_reaction():
     try:
+        initialize_services()  # Lazy load services when needed
         data = request.get_json()
         reaction_smiles = data.get('reaction_smiles')
         if not reaction_smiles:
             return jsonify({'error': 'Reaction SMILES is required.'}), 400
-
-        # Use the global analyzer instance
-        if analyzer is None:
-            return jsonify({'error': 'SynthesisAnalyzer not initialized.'}), 500
 
         base64_image = analyzer._generate_reaction_image(reaction_smiles)
 
@@ -361,15 +371,13 @@ def stop_prediction():
 def find_buyers():
     """Endpoint to find potential API buyers for a given API name."""
     try:
+        initialize_services()  # Lazy load services when needed
         data = request.get_json()
         api_name = data.get('api_name')
         country = data.get('country') # Extract country from request
 
         if not api_name or not country: # Both are now required
             return jsonify({'error': 'API name and country are required'}), 400
-
-        if api_buyer_finder is None:
-            return jsonify({'error': 'ApiBuyerFinder not initialized.'}), 500
 
         results = api_buyer_finder.find_api_buyers(api_name, country) # Pass both api_name and country
         return jsonify(results) # Return the full results dictionary directly
@@ -381,15 +389,13 @@ def find_buyers():
 def find_manufacturers():
     """Search API manufacturers stored in the legacy Excel-backed SQLite database."""
     try:
+        initialize_services()  # Lazy load services when needed
         data = request.get_json()
         api_name = data.get('api_name', '').strip()
         country = data.get('country', '').strip()
 
         if not api_name or not country:
             return jsonify({'success': False, 'error': 'API name and country are required'}), 400
-
-        if api_manufacturer_service is None:
-            return jsonify({'success': False, 'error': 'Manufacturer service not initialized'}), 500
 
         records = api_manufacturer_service.query(api_name, country)
         return jsonify({
@@ -407,16 +413,13 @@ def find_manufacturers():
 def discover_manufacturers():
     """Run Google discovery and persist new manufacturers into the discovery database."""
     try:
+        initialize_services()  # Lazy load services when needed
         data = request.get_json()
         api_name = data.get('api_name', '').strip()
         country = data.get('country', '').strip()
 
         if not api_name or not country:
             return jsonify({'success': False, 'error': 'API name and country are required'}), 400
-
-        # Use the main manufacturer service (same database as CSV import) instead of new_manufacturer_service
-        if api_manufacturer_service is None or api_manufacturer_discovery is None:
-            return jsonify({'success': False, 'error': 'Discovery service not initialized'}), 500
 
         discovery_result = api_manufacturer_discovery.discover(api_name, country)
         if not discovery_result.get('success', False):
@@ -439,6 +442,7 @@ def discover_manufacturers():
 def download_buyers():
     """Download API buyers data as CSV or Excel - includes ALL entries from database"""
     try:
+        initialize_services()  # Lazy load services when needed
         data = request.get_json()
         api_name = data.get('api_name', '').strip()
         country = data.get('country', '').strip()
@@ -446,9 +450,6 @@ def download_buyers():
         
         if not api_name or not country:
             return jsonify({'success': False, 'error': 'API name and country are required'}), 400
-        
-        if api_buyer_finder is None:
-            return jsonify({'success': False, 'error': 'ApiBuyerFinder not initialized'}), 500
         
         # Fetch ALL data directly from database (existing + newly added)
         engine = api_buyer_finder.get_db_engine()
@@ -531,6 +532,7 @@ def download_buyers():
 def download_manufacturers():
     """Download API manufacturers data as CSV or Excel - includes ALL entries from database"""
     try:
+        initialize_services()  # Lazy load services when needed
         data = request.get_json()
         api_name = data.get('api_name', '').strip()
         country = data.get('country', '').strip()
@@ -538,9 +540,6 @@ def download_manufacturers():
         
         if not api_name or not country:
             return jsonify({'success': False, 'error': 'API name and country are required'}), 400
-        
-        if api_manufacturer_service is None:
-            return jsonify({'success': False, 'error': 'Manufacturer service not initialized'}), 500
         
         # Get ALL records directly from database (includes existing + newly discovered)
         records = api_manufacturer_service.query(api_name, country)

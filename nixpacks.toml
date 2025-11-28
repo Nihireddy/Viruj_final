@@ -25,5 +25,5 @@ cmds = [
 ]
 
 [start]
-cmd = "cd synthesis_route_finder && gunicorn app:app"
+cmd = "cd synthesis_route_finder && gunicorn --config gunicorn.conf.py app:app"
 
