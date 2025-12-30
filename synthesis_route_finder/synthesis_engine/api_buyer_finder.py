@@ -599,9 +599,14 @@ Return ONLY the markdown table, no explanations.
                 additional_info = str(row.get('additional_info', '')).strip()
                 company = str(row.get('company', '')).strip()
                 url = str(row.get('url', '')).strip()
+                strength = str(row.get('strength', '')).strip()
                 
                 # Form is REQUIRED - cannot be empty
                 if not form or form.lower() in ['', 'unknown', 'n/a', 'na', 'none']:
+                    return False
+                
+                # Strength is REQUIRED - cannot be empty
+                if not strength or strength.lower() in ['', 'unknown', 'n/a', 'na', 'none']:
                     return False
                 
                 # URL is REQUIRED - must be a valid HTTP/HTTPS URL
@@ -827,6 +832,19 @@ Return ONLY the markdown table, no explanations.
         verified_df = verified_df.drop_duplicates(
             subset=["company", "form", "strength", "url"], keep="first"
         )
+        
+        # Filter out records without strength - strength is required for API buyers
+        before_strength_filter = len(verified_df)
+        if "strength" in verified_df.columns:
+            # Filter out rows where strength is empty, null, or only whitespace
+            strength_mask = verified_df["strength"].astype(str).str.strip() != ""
+            verified_df = verified_df[strength_mask].copy()
+            removed_no_strength = before_strength_filter - len(verified_df)
+            if removed_no_strength > 0:
+                logger.info(f"🚫 Filtered out {removed_no_strength} entries without strength (strength is required)")
+        else:
+            # If strength column doesn't exist at all, log warning but continue
+            logger.warning("⚠ Strength column missing in verified_df")
 
         # Ensure confidence column exists before sorting (CRITICAL - prevents KeyError)
         if verified_df.empty:
@@ -1052,7 +1070,30 @@ Return ONLY the markdown table, no explanations.
                 
                 # Final URL validation - ensure no empty URLs slipped through
                 if "url" in df_insert.columns:
+                    before_url_filter = len(df_insert)
                     df_insert = df_insert[df_insert["url"].str.strip().str.startswith("http", na=False)].copy()
+                    removed_no_url = before_url_filter - len(df_insert)
+                    if removed_no_url > 0:
+                        logger.warning(f"🚫 Removed {removed_no_url} entries without valid URLs")
+                
+                # Filter out records without strength - strength is required
+                before_strength_filter = len(df_insert)
+                if "strength" in df_insert.columns:
+                    # Filter out rows where strength is empty, null, or only whitespace
+                    df_insert = df_insert[df_insert["strength"].astype(str).str.strip() != ""].copy()
+                    removed_no_strength = before_strength_filter - len(df_insert)
+                    if removed_no_strength > 0:
+                        logger.warning(f"🚫 Removed {removed_no_strength} entries without strength (strength is required)")
+                else:
+                    # If strength column doesn't exist, remove all records
+                    logger.warning(f"🚫 Strength column missing - removing all {len(df_insert)} entries")
+                    df_insert = pd.DataFrame()
+                
+                if df_insert.empty:
+                    logger.warning("⚠ No records with valid strength to insert")
+                    cursor.close()
+                    conn.close()
+                    return pd.DataFrame()
                 
                 # Prepare columns for insertion
                 columns = [
@@ -1068,9 +1109,10 @@ Return ONLY the markdown table, no explanations.
                     row_values = [str(row.get(col, "")) if pd.notna(row.get(col, "")) else "" for col in available_columns]
                     values.append(tuple(row_values))
                 
-                # Check for existing records
+                # Check for existing records in database AND duplicates within the batch
                 existing_count = 0
                 new_records = []
+                seen_in_batch = set()  # Track records seen in this batch to prevent duplicates
                 
                 fetch_existing_query = """
                     SELECT company, form, strength, api_name, manufacturer_country
@@ -1092,22 +1134,38 @@ Return ONLY the markdown table, no explanations.
                     )
                     existing_keys.add(existing_key)
                 
+                # Process each record: check against database AND against records already in this batch
                 for value_tuple in values:
                     row_idx = values.index(value_tuple)
                     row = df_insert.iloc[row_idx]
                     
+                    # Create unique key for duplicate checking
+                    # Using: company + form + strength + api_name + manufacturer_country
+                    company_val = str(row.get("company", "")).strip().lower()
+                    form_val = str(row.get("form", "")).strip().lower()
+                    strength_val = str(row.get("strength", "")).strip().lower()
+                    api_val = str(row.get("api_name", api)).strip().lower()
+                    country_val = str(row.get("manufacturer_country", country)).strip().lower()
+                    
                     record_key = (
-                        str(row.get("company", "")).strip().lower(),
-                        str(row.get("form", "")).strip().lower(),
-                        str(row.get("strength", "")).strip().lower(),
-                        str(row.get("api_name", api)).strip().lower(),
-                        str(row.get("manufacturer_country", country)).strip().lower()
+                        company_val,
+                        form_val,
+                        strength_val,
+                        api_val,
+                        country_val
                     )
                     
+                    # Check if duplicate exists in database OR in this batch
                     if record_key in existing_keys:
                         existing_count += 1
+                        logger.debug(f"🚫 Skipping duplicate (exists in DB): {company_val} - {form_val} - {strength_val}")
+                    elif record_key in seen_in_batch:
+                        existing_count += 1
+                        logger.debug(f"🚫 Skipping duplicate (exists in batch): {company_val} - {form_val} - {strength_val}")
                     else:
+                        # This is a new, unique record
                         new_records.append(value_tuple)
+                        seen_in_batch.add(record_key)  # Track it to prevent duplicates in same batch
                 
                 if not new_records:
                     logger.info(f"ℹ All {len(values)} records already exist in database")
@@ -1166,19 +1224,24 @@ Return ONLY the markdown table, no explanations.
         if not result_df.empty:
             newly_inserted_df = self.insert_into_viruj(result_df, api, country)
         
-        # Step 4: Format results for Flask interface
+        # Step 4: Format results for Flask interface - include ALL database fields
         existing_data_formatted = []
         if not existing_data_df.empty:
             for _, row in existing_data_df.iterrows():
                 existing_dict = {
                     'company': str(row.get('company', '')),
-                    'api': str(row.get('api_name', api)) if 'api_name' in row else api,
+                    'api_name': str(row.get('api_name', api)) if 'api_name' in row else api,
+                    'api': str(row.get('api_name', api)) if 'api_name' in row else api,  # Keep for backward compatibility
                     'country': str(row.get('manufacturer_country', country)) if 'manufacturer_country' in row else country,
+                    'manufacturer_country': str(row.get('manufacturer_country', country)) if 'manufacturer_country' in row else country,
                     'form': str(row.get('form', '')),
                     'strength': str(row.get('strength', '')),
                     'additional_info': str(row.get('additional_info', '')),
                     'url': str(row.get('url', '')),
                     'confidence': int(row.get('confidence', 0)) if pd.notna(row.get('confidence', 0)) else 0,
+                    'verification_source': str(row.get('verification_source', '')),
+                    'verification_status': str(row.get('verification_status', 'Unverified')),
+                    'source_site': str(row.get('source_site', ''))
                 }
                 existing_data_formatted.append(existing_dict)
         
@@ -1187,13 +1250,18 @@ Return ONLY the markdown table, no explanations.
             for _, row in newly_inserted_df.iterrows():
                 company_dict = {
                     'company': str(row.get('company', '')),
-                    'api': api,
-                    'country': country,
+                    'api_name': str(row.get('api_name', api)) if 'api_name' in row else api,
+                    'api': str(row.get('api_name', api)) if 'api_name' in row else api,  # Keep for backward compatibility
+                    'country': str(row.get('manufacturer_country', country)) if 'manufacturer_country' in row else country,
+                    'manufacturer_country': str(row.get('manufacturer_country', country)) if 'manufacturer_country' in row else country,
                     'form': str(row.get('form', '')),
                     'strength': str(row.get('strength', '')),
                     'additional_info': str(row.get('additional_info', '')),
                     'url': str(row.get('url', '')),
                     'confidence': int(row.get('confidence', 0)) if pd.notna(row.get('confidence', 0)) else 0,
+                    'verification_source': str(row.get('verification_source', '')),
+                    'verification_status': str(row.get('verification_status', 'Unverified')),
+                    'source_site': str(row.get('source_site', ''))
                 }
                 newly_found_companies.append(company_dict)
         

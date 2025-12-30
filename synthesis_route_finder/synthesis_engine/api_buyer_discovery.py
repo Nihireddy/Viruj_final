@@ -646,15 +646,20 @@ Return ONLY the markdown table, no explanations.
             all_df["manufacturer_country"] = all_df["manufacturer_country"].replace("EMPTY", "")
             all_df["manufacturer_country"] = all_df["manufacturer_country"].fillna("")
         
-        # ADDITIONAL VALIDATION: Reject entries with empty form or empty additional_info
+        # ADDITIONAL VALIDATION: Reject entries with empty form, empty additional_info, or empty strength
         if not all_df.empty:
             def has_minimum_required_data(row):
                 """Check if row has minimum required data."""
                 form = str(row.get('form', '')).strip()
                 additional_info = str(row.get('additional_info', '')).strip()
+                strength = str(row.get('strength', '')).strip()
                 
                 # Form is REQUIRED - reject if empty
                 if not form or form.lower() in ['', 'unknown', 'n/a', 'na', 'none']:
+                    return False
+                
+                # Strength is REQUIRED - reject if empty
+                if not strength or strength.lower() in ['', 'unknown', 'n/a', 'na', 'none']:
                     return False
                 
                 # Additional Info is REQUIRED - must have brand name or evidence
@@ -669,7 +674,7 @@ Return ONLY the markdown table, no explanations.
             
             removed_min = before_min_validation - len(all_df)
             if removed_min > 0:
-                logger.info(f"🚫 Removed {removed_min} entries missing form or additional_info")
+                logger.info(f"🚫 Removed {removed_min} entries missing form, strength, or additional_info")
 
         # Ensure all required columns exist in all_df before filtering (safety check)
         required_columns = ["company", "form", "strength", "manufacturer_country", "verification_source", 
@@ -917,6 +922,25 @@ Return ONLY the markdown table, no explanations.
                 "manufacturer_country": country
             })
             
+            # Filter out records without strength - strength is required
+            before_strength_filter = len(df_insert)
+            if "strength" in df_insert.columns:
+                # Filter out rows where strength is empty, null, or only whitespace
+                df_insert = df_insert[df_insert["strength"].astype(str).str.strip() != ""].copy()
+                removed_no_strength = before_strength_filter - len(df_insert)
+                if removed_no_strength > 0:
+                    logger.warning(f"🚫 Removed {removed_no_strength} entries without strength (strength is required)")
+            else:
+                # If strength column doesn't exist, remove all records
+                logger.warning(f"🚫 Strength column missing - removing all {len(df_insert)} entries")
+                df_insert = pd.DataFrame()
+            
+            if df_insert.empty:
+                logger.warning("⚠ No records with valid strength to insert")
+                cursor.close()
+                conn.close()
+                return True, 0, 0
+            
             # Prepare columns for insertion (match Supabase schema)
             columns = [
                 "company", "form", "strength", "verification_source", 
@@ -938,6 +962,7 @@ Return ONLY the markdown table, no explanations.
             # This is more comprehensive to catch duplicates even if URL differs
             existing_count = 0
             new_records = []
+            seen_in_batch = set()  # Track records seen in this batch to prevent duplicates within the same batch
             
             # Fetch all existing records for this API and country to compare
             fetch_existing_query = """
@@ -967,12 +992,13 @@ Return ONLY the markdown table, no explanations.
                 )
                 existing_keys.add(existing_key)
             
+            # Process each record: check against database AND against records already in this batch
             for value_tuple in values:
                 # Find corresponding row to get values for duplicate check
                 row_idx = values.index(value_tuple)
                 row = df_insert.iloc[row_idx]
                 
-                # Create key for this record
+                # Create key for this record (normalized for comparison)
                 company_key = str(row.get("company", "")).strip().lower()
                 form_key = str(row.get("form", "")).strip().lower()
                 strength_key = str(row.get("strength", "")).strip().lower()
@@ -987,11 +1013,17 @@ Return ONLY the markdown table, no explanations.
                     country_key
                 )
                 
-                # Check if record already exists
+                # Check if record already exists in database OR in this batch
                 if record_key in existing_keys:
                     existing_count += 1
+                    logger.debug(f"🚫 Skipping duplicate (exists in DB): {company_key} - {form_key} - {strength_key}")
+                elif record_key in seen_in_batch:
+                    existing_count += 1
+                    logger.debug(f"🚫 Skipping duplicate (exists in batch): {company_key} - {form_key} - {strength_key}")
                 else:
+                    # This is a new, unique record
                     new_records.append(value_tuple)
+                    seen_in_batch.add(record_key)  # Track it to prevent duplicates in same batch
             
             if not new_records:
                 logger.info(f"ℹ All {len(values)} records already exist in database")
@@ -1083,7 +1115,7 @@ Return ONLY the markdown table, no explanations.
             
             # 4. Convert DataFrames to list of dicts in format expected by interface
             def df_to_dict_list(df: pd.DataFrame, api_name: str, country_name: str) -> List[Dict]:
-                """Convert DataFrame to list of dicts with keys expected by interface."""
+                """Convert DataFrame to list of dicts with all fields from database schema."""
                 if df.empty:
                     return []
                 
@@ -1091,13 +1123,18 @@ Return ONLY the markdown table, no explanations.
                 for _, row in df.iterrows():
                     result_list.append({
                         'company': str(row.get('company', '')),
-                        'api': api_name,
+                        'api_name': str(row.get('api_name', api_name)),
+                        'api': str(row.get('api_name', api_name)),  # Keep for backward compatibility
                         'country': str(row.get('manufacturer_country', country_name)),
+                        'manufacturer_country': str(row.get('manufacturer_country', country_name)),
                         'form': str(row.get('form', '')),
                         'strength': str(row.get('strength', '')),
                         'additional_info': str(row.get('additional_info', '')),
                         'url': str(row.get('url', '')),
-                        'confidence': int(row.get('confidence', 0)) if pd.notna(row.get('confidence')) else 0
+                        'confidence': int(row.get('confidence', 0)) if pd.notna(row.get('confidence')) else 0,
+                        'verification_source': str(row.get('verification_source', '')),
+                        'verification_status': str(row.get('verification_status', 'Unverified')),
+                        'source_site': str(row.get('source_site', ''))
                     })
                 return result_list
             
