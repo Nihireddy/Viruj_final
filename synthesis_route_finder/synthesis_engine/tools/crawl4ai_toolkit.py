@@ -59,3 +59,4 @@ class Crawl4aiTools(Toolkit):
             snippet = markdown[:max_length] if max_length else markdown
             return snippet.replace("  ", " ")
 
+

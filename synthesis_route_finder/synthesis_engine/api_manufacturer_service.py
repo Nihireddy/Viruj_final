@@ -12,7 +12,7 @@ class ApiManufacturerService:
     and to query manufacturers by API name & country.
     """
 
-    def __init__(self, db_filename: str | None = None, table_name: str = "API_manufacturers"):
+    def __init__(self, db_filename: str | None = None, table_name: str = "api_manufacturers"):
         self.table_name = table_name
         self.db_path = None
         self.is_postgresql = False
@@ -29,6 +29,7 @@ class ApiManufacturerService:
                 echo=False,
                 pool_pre_ping=True,
             )
+            print("✅ ApiManufacturerService: Using Supabase PostgreSQL database")
         else:
             # Priority 2: Fallback to SQLite (local development)
             self.db_path = self._determine_db_path(db_filename)
@@ -89,6 +90,8 @@ class ApiManufacturerService:
         """Create table with appropriate syntax for PostgreSQL or SQLite"""
         if self.is_postgresql:
             # PostgreSQL syntax
+            # PostgreSQL syntax - matches Supabase schema
+            # Note: Table already exists in Supabase, so this is just for local dev
             create_sql = f"""
             CREATE TABLE IF NOT EXISTS {self.table_name} (
                 id SERIAL PRIMARY KEY,
@@ -101,7 +104,7 @@ class ApiManufacturerService:
                 imported_at TEXT,
                 source_url TEXT,
                 source_name TEXT,
-                UNIQUE(api_name, manufacturer, country)
+                CONSTRAINT {self.table_name}_api_name_manufacturer_country_key UNIQUE (api_name, manufacturer, country)
             );
             """
         else:
@@ -292,7 +295,7 @@ class ApiManufacturerService:
                 INSERT INTO {self.table_name}
                 (api_name, manufacturer, country, usdmf, cep, source_file, imported_at, source_url, source_name)
                 VALUES (:api_name, :manufacturer, :country, :usdmf, :cep, :source_file, :imported_at, :source_url, :source_name)
-                ON CONFLICT (api_name, manufacturer, country) DO NOTHING;
+                ON CONFLICT ON CONSTRAINT api_manufacturers_api_name_manufacturer_country_key DO NOTHING;
                 """
             )
         else:

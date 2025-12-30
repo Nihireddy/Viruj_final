@@ -24,15 +24,17 @@ sys.path.append(os.path.join(os.path.dirname(__file__), 'synthesis_engine'))
 from synthesis_engine.analysis import SynthesisAnalyzer
 from synthesis_engine.utils import initialize_session, get_session_data, update_session_data
 from synthesis_engine.api_buyer_finder import ApiBuyerFinder  # Import the new API Buyer Finder
+from synthesis_engine.api_buyer_discovery import ApiBuyerDiscoveryService
 from synthesis_engine.api_manufacturer_service import ApiManufacturerService
 from synthesis_engine.api_manufacturer_discovery import ApiManufacturerDiscoveryService
 
 app = Flask(__name__)
-app.secret_key = 'your-secret-key-here'  # Change this to a secure secret key
+app.secret_key = os.getenv('SECRET_KEY', 'your-secret-key-here-change-in-production')  # Use environment variable for security
 
 # Global analyzer instance - lazy loaded to reduce memory usage
 analyzer = None
 api_buyer_finder = None # Global instance for API Buyer Finder
+api_buyer_discovery = None
 api_manufacturer_service = None
 api_manufacturer_discovery = None
 new_manufacturer_service = None
@@ -46,7 +48,8 @@ progress_queues = {}
 # Lazy initialization function to reduce startup memory usage
 def initialize_services():
     """Lazy initialization of heavy services to reduce memory footprint"""
-    global analyzer, api_buyer_finder, api_manufacturer_service, api_manufacturer_discovery
+    global analyzer, api_buyer_finder, api_buyer_discovery
+    global api_manufacturer_service, api_manufacturer_discovery
     global new_manufacturer_service, new_manufacturer_discovery
     
     if analyzer is None:
@@ -56,6 +59,12 @@ def initialize_services():
     if api_buyer_finder is None:
         with app.app_context():
             api_buyer_finder = ApiBuyerFinder()
+            # Use ApiBuyerDiscoveryService for verified discovery
+            api_buyer_discovery = ApiBuyerDiscoveryService()
+    elif api_buyer_discovery is None:
+        with app.app_context():
+            # Use ApiBuyerDiscoveryService for verified discovery
+            api_buyer_discovery = ApiBuyerDiscoveryService()
     
     if api_manufacturer_service is None:
         with app.app_context():
@@ -123,7 +132,8 @@ def analyze_synthesis():
                     'results': result,
                     'timestamp': datetime.now().isoformat()
                 })
-                progress_queues[session_id].put({'percentage': 100, 'message': 'Analysis complete!'})
+                if session_id in progress_queues:
+                    progress_queues[session_id].put({'percentage': 100, 'message': 'Analysis complete!'})
             except Exception as e:
                 print(f"Error in analysis thread for session {session_id}: {e}")
                 update_session_data(session_id, {
@@ -131,7 +141,8 @@ def analyze_synthesis():
                     'results': {'success': False, 'error': f'Analysis failed: {str(e)}'},
                     'timestamp': datetime.now().isoformat()
                 })
-                progress_queues[session_id].put({'percentage': 0, 'message': f'Analysis failed: {str(e)}', 'error': True})
+                if session_id in progress_queues:
+                    progress_queues[session_id].put({'percentage': 0, 'message': f'Analysis failed: {str(e)}', 'error': True})
             finally:
                 # Clean up the queue and event after analysis (or stop)
                 if session_id in progress_queues:
@@ -374,13 +385,24 @@ def find_buyers():
         initialize_services()  # Lazy load services when needed
         data = request.get_json()
         api_name = data.get('api_name')
-        country = data.get('country') # Extract country from request
+        country = data.get('country')  # Extract country from request
+        verified = data.get('verified', True)
 
-        if not api_name or not country: # Both are now required
+        if not api_name or not country:  # Both are now required
             return jsonify({'error': 'API name and country are required'}), 400
 
-        results = api_buyer_finder.find_api_buyers(api_name, country) # Pass both api_name and country
-        return jsonify(results) # Return the full results dictionary directly
+        # VERIFIED MODE: use only evidence-driven V2 discovery (no legacy fallback)
+        if verified:
+            if not api_buyer_discovery:
+                return jsonify({'success': False, 'error': 'Verified buyer discovery service not available.'}), 500
+
+            discovery_result = api_buyer_discovery.discover(api_name, country)
+            # Always return the discovery_result as-is (success may be True or False)
+            return jsonify(discovery_result)
+
+        # UNVERIFIED MODE: use legacy finder (may return heuristic / potential leads)
+        results = api_buyer_finder.find_api_buyers(api_name, country)  # Pass both api_name and country
+        return jsonify(results)  # Return the full results dictionary directly
     except Exception as e:
         print(f"[DEBUG] Error in find_buyers endpoint: {e}")
         return jsonify({'success': False, 'error': f'Server error: {str(e)}'}), 500
